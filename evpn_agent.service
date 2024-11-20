@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenStack EVPN Agent
+After=frr.service
+Wants=frr.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStartPre=modprobe bridge
+ExecStartPre=-ip -4 rule add priority 1001 l3mdev unreachable
+ExecStartPre=-ip -6 rule add priority 1001 l3mdev unreachable
+ExecStartPre=-ip -4 rule add priority 2000 table local
+ExecStartPre=-ip -4 rule del priority 0 table local
+ExecStartPre=-ip -6 rule add priority 2000 table local
+ExecStartPre=-ip -6 rule del priority 0 table local
+ExecStart=python3 -m evpn_agent
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

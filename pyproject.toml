@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evpn_agent"
+version = "0.0.1"
+authors = [
+  { name="Tore Anderson", email="tore@redpill-linpro.com" },
+]
+description = "OpenStack EVPN Agent"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: OpenStack",
+    "Framework :: Hatch",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/toreanderson/evpn_agent"
+Issues = "https://github.com/toreanderson/evpn_agent/issues"
