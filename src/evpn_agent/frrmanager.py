@@ -17,74 +17,65 @@
 
 import logging
 import re
+from tempfile import NamedTemporaryFile
+from importlib.machinery import SourceFileLoader
 from .utils import cmd
 
 log = logging.getLogger(__name__)
 
-running_config = []
-known_vrfs = {}
-known_ra_devs = []
+frrlib = SourceFileLoader("frrlib", "/usr/libexec/frr/frr-reload.py").load_module()
+
+vtysh = frrlib.Vtysh()
+
+running_config = None
+target_config = None
 
 
 def update():
     global running_config
+    global target_config
 
-    running_config = []
-    proc = cmd(["vtysh", "-c", "show running-config"], capture_output=True, text=True)
-    running_config = proc.stdout.splitlines()
+    running_config = frrlib.Config(vtysh=vtysh)
+    running_config.load_from_show_running(daemon=None)
+
+    target_config = frrlib.Config(vtysh=vtysh)
+    target_config.load_from_file("/etc/frr/frr.conf")
 
 
 def finalise():
-    global known_vrfs
-    global known_ra_devs
+    (add, delete) = frrlib.compare_context_objects(target_config, running_config)
 
-    prune()
+    # The comparison may produce redundant commands, e.g., if the same resource has been
+    # ensured multiple times (for example: many networks may have the same L3VNI, if so
+    # the VRF/L3VNI mapping will have been ensured once per network). Run them through a
+    # dict to get rid of the duplicates (while maintaining the ordering of the first
+    # occurrences, which set() unfortunately won't do for us).
+
+    for ctx, line in dict.fromkeys(delete).keys():
+        cmd = frrlib.lines_to_config(ctx, line, delete=True)
+        log.warning(f"Configuring FRR: {cmd}")
+        vtysh(["configure"] + cmd)
+    for ctx, line in dict.fromkeys(add).keys():
+        cmd = frrlib.lines_to_config(ctx, line, delete=False)
+        log.warning(f"Configuring FRR: {cmd}")
+        vtysh(["configure"] + cmd)
+
     update()
-
-    known_vrfs = {}
-    known_ra_devs = []
 
 
 def ensure_vrf(*, vrf, l3vni=None):
-    global known_vrfs
-
-    log.info(f"Ensuring VRF {vrf} with l3vni {l3vni}")
-
-    # FIXME: this should probably have tried to check if everything is already
-    # correctly in the running (in "running_config") and only sent the updated config to
-    # vtysh if it is not. leave that for later, because FRR is such a massive pain in
-    # the arse to configure due to its transactional way of configuration.
-
-    known_vrfs[vrf] = l3vni
-
     asn = get_asn()
-    vnimap = f"vni {l3vni}" if l3vni else "!"
-    leak = "" if l3vni == 0 else "no "
 
     frrconf = f"""
-        configure
-        vrf {vrf}
-            {vnimap}
-        exit-vrf
-        router bgp {asn}
-            address-family ipv4 unicast
-                {leak}import vrf {vrf}
-            exit-address-family
-            address-family ipv6 unicast
-                {leak}import vrf {vrf}
-            exit-address-family
-        exit
         router bgp {asn} vrf {vrf}
             bgp bestpath as-path multipath-relax
             address-family ipv4 unicast
                 redistribute kernel
                 redistribute connected
-                {leak}import vrf default
             exit-address-family
             address-family ipv6 unicast
                 redistribute kernel
                 redistribute connected
-                {leak}import vrf default
             exit-address-family
             address-family l2vpn evpn
                 advertise ipv4 unicast
@@ -93,85 +84,72 @@ def ensure_vrf(*, vrf, l3vni=None):
         exit
     """
 
-    log.debug(f"Pushing the following to vtysh: {frrconf}")
-    proc = cmd(["vtysh"], input=frrconf, text=True, capture_output=True)
-    log.debug(f"vtysh stdout: {proc.stdout}")
-    log.debug(f"vtysh stderr: {proc.stderr}")
+    # Configure L3VNI mapping for VRF, if one is provided
+    if l3vni:
+        frrconf += f"""
+            vrf {vrf}
+                vni {l3vni}
+            exit-vrf
+        """
+
+    # Configure leaking of routes to/from underlay if l3vni=0 (as opposed to None)
+    if l3vni == 0:
+        frrconf += f"""
+            router bgp {asn}
+                address-family ipv4 unicast
+                    import vrf {vrf}
+                exit-address-family
+                address-family ipv6 unicast
+                    import vrf {vrf}
+                exit-address-family
+            exit
+            router bgp {asn} vrf {vrf}
+                address-family ipv4 unicast
+                    import vrf default
+                exit-address-family
+                address-family ipv6 unicast
+                    import vrf default
+                exit-address-family
+            exit
+        """
+
+    log.debug(f"Adding to FRR target config: {frrconf}")
+    with NamedTemporaryFile(mode="w") as tmp:
+        tmp.file.write(frrconf)
+        tmp.file.flush()
+        target_config.load_from_file(tmp.name)
 
 
 def ensure_ra(*, dev, prefix, mode):
-    global known_ra_devs
-
-    # FIXME: this should probably have tried to check if everything is already
-    # correctly in the running (in "running_config") and only sent the updated config to
-    # vtysh if it is not. leave that for later, because FRR is such a massive pain in
-    # the arse to configure due to its transactional way of configuration.
-
     log.info(f"Ensuring ICMPv6 RA on {dev} for {prefix} ({mode})")
-    known_ra_devs.append(dev)
+
+    frrconf = f"interface {dev}\n"
 
     # Set RA flags according depending on ipv6_ra_mode according to
     # https://docs.openstack.org/neutron/latest/admin/config-ipv6.html
-    if mode == "slaac":
-        aflag = True
-        mflag = False
-        oflag = False
-    elif mode == "dhcpv6-stateful":
-        aflag = False
-        mflag = True
-        oflag = False
-    elif mode == "dhcpv6-stateless":
-        aflag = True
-        mflag = False
-        oflag = True
+    #
+    # SLAAC mode (A,M,O = 1,0,0) is FRR default behaviour
 
-    frrconf = f"""
-        configure
-        interface {dev}
-            {"" if mflag else "!"}ipv6 nd managed-config-flag
-            {"" if oflag else "!"}ipv6 nd other-config-flag
-            {"!" if aflag else ""}ipv6 nd prefix {prefix} no-autoconfig
-            no ipv6 nd suppress-ra
-        exit
-    """
+    if mode == "dhcpv6-stateful":  # A,M,O = 0,1,0
+        frrconf += "  ipv6 nd managed-config-flag\n"
+        frrconf += f"  ipv6 nd prefix {prefix} no-autoconfig\n"
+    elif mode == "dhcpv6-stateless":  # A,M,O = 1,0,1
+        frrconf += "  ipv6 nd other-config-flag\n"
 
-    log.debug(f"Pushing the following to vtysh: {frrconf}")
-    proc = cmd(["vtysh"], input=frrconf, text=True, capture_output=True)
-    log.debug(f"vtysh stdout: {proc.stdout}")
-    log.debug(f"vtysh stderr: {proc.stderr}")
+    frrconf += "  no ipv6 nd suppress-ra\n"
+    frrconf += "exit\n"
+
+    log.debug(f"Adding to FRR target config: {frrconf}")
+    with NamedTemporaryFile(mode="w") as tmp:
+        tmp.file.write(frrconf)
+        tmp.file.flush()
+        target_config.load_from_file(tmp.name)
 
 
 def get_asn():
-    for line in running_config:
-        if match := re.search(r"^router bgp (\d+)$", line):
+    for line in running_config.contexts:
+        if match := re.match(r"router bgp (\d+)$", line[0]):
             return match.group(1)
-
-
-def prune():
-    frrconf = ""
-
-    for line in running_config:
-        if match := re.search(r"^interface (irb-\S+)$", line):
-            if not match.group(1) in known_ra_devs:
-                log.warning(f"Removing orphaned RA device {match.group(1)}")
-                frrconf = frrconf + f"no {match.string}\n"
-        if match := re.search(r"^vrf (vrf-\S+)$", line):
-            if not match.group(1) in known_vrfs:
-                log.warning(f"Removing orphaned VRF {match.group(1)}")
-                frrconf = frrconf + f"no {match.string}\n"
-        if match := re.search(r"^router bgp \d+ vrf (vrf-\S+)$", line):
-            if not match.group(1) in known_vrfs:
-                log.warning(f"Removing orphaned BGP instance for VRF {match.group(1)}")
-                frrconf = frrconf + f"no {match.string}\n"
-
-    if not frrconf:
-        return
-
-    frrconf = "configure\n" + frrconf
-    log.debug(f"Pushing the following to vtysh: {frrconf}")
-    proc = cmd(["vtysh"], input=frrconf, text=True, capture_output=True)
-    log.debug(f"vtysh stdout: {proc.stdout}")
-    log.debug(f"vtysh stderr: {proc.stderr}")
 
 
 # Ensure the cache is populated during initial import
