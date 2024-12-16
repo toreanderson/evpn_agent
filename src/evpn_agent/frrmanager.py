@@ -18,6 +18,7 @@
 import logging
 import re
 from tempfile import NamedTemporaryFile
+from textwrap import dedent
 from importlib.machinery import SourceFileLoader
 from .utils import cmd
 
@@ -66,7 +67,8 @@ def finalise():
 def ensure_vrf(*, vrf, l3vni=None):
     asn = get_asn()
 
-    frrconf = f"""
+    frrconf = dedent(
+        f"""\
         router bgp {asn} vrf {vrf}
             bgp bestpath as-path multipath-relax
             address-family ipv4 unicast
@@ -82,19 +84,23 @@ def ensure_vrf(*, vrf, l3vni=None):
                 advertise ipv6 unicast
             exit-address-family
         exit
-    """
+        """
+    )
 
     # Configure L3VNI mapping for VRF, if one is provided
     if l3vni:
-        frrconf += f"""
-            vrf {vrf}
-                vni {l3vni}
-            exit-vrf
-        """
+        frrconf += dedent(
+            f"""\
+                vrf {vrf}
+                    vni {l3vni}
+                exit-vrf
+            """
+        )
 
     # Configure leaking of routes to/from underlay if l3vni=0 (as opposed to None)
     if l3vni == 0:
-        frrconf += f"""
+        frrconf += dedent(
+            f"""\
             router bgp {asn}
                 address-family ipv4 unicast
                     import vrf {vrf}
@@ -111,9 +117,12 @@ def ensure_vrf(*, vrf, l3vni=None):
                     import vrf default
                 exit-address-family
             exit
-        """
+            """
+        )
 
-    log.debug(f"Adding to FRR target config: {frrconf}")
+    log.debug("Adding to FRR target config:")
+    for line in frrconf.splitlines():
+        log.debug("> " + line)
     with NamedTemporaryFile(mode="w") as tmp:
         tmp.file.write(frrconf)
         tmp.file.flush()
@@ -131,15 +140,17 @@ def ensure_ra(*, dev, prefix, mode):
     # SLAAC mode (A,M,O = 1,0,0) is FRR default behaviour
 
     if mode == "dhcpv6-stateful":  # A,M,O = 0,1,0
-        frrconf += "  ipv6 nd managed-config-flag\n"
-        frrconf += f"  ipv6 nd prefix {prefix} no-autoconfig\n"
+        frrconf += "    ipv6 nd managed-config-flag\n"
+        frrconf += f"    ipv6 nd prefix {prefix} no-autoconfig\n"
     elif mode == "dhcpv6-stateless":  # A,M,O = 1,0,1
-        frrconf += "  ipv6 nd other-config-flag\n"
+        frrconf += "    ipv6 nd other-config-flag\n"
 
-    frrconf += "  no ipv6 nd suppress-ra\n"
+    frrconf += "    no ipv6 nd suppress-ra\n"
     frrconf += "exit\n"
 
-    log.debug(f"Adding to FRR target config: {frrconf}")
+    log.debug("Adding to FRR target config")
+    for line in frrconf.splitlines():
+        log.debug("> " + line)
     with NamedTemporaryFile(mode="w") as tmp:
         tmp.file.write(frrconf)
         tmp.file.flush()
