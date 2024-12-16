@@ -94,6 +94,7 @@ while True:
         mtu = net["mtu"]
         l2vni = net["l2vni"]
         l3vni = net["l3vni"]
+        advertise_connected = net["advertise_connected"]
 
         # If the network has a L3VNI assigned, associate it to a VRF that is shared
         # between all networks using that L3VNI. Otherwise, associate it to an isolated
@@ -220,6 +221,17 @@ while True:
         # is taken to mean the provider network is L2 only, and that the L3 gateway (if
         # any) is located on a device external to OpenStack (behind a remote VTEP).
         if l3vni is not None:
+            # If the network is configured for advertisement of its connected prefixes,
+            # ensure the redistribute connected route map for the VRF allows that.
+            #
+            # If this is unset, only known IP addresses associated to OpenStack ports
+            # are advertised. This eliminates Internet background radiation (scanning
+            # and so on) addressed to unused IP addresses from reaching the IRB and
+            # causing pointless ARP/NS queries. However it means that IP addresses not
+            # known to OpenStack will not be reachable.
+            if advertise_connected:
+                FrrManager.ensure_advertise_connected(vrf=vrf, vlanid=vid)
+
             # Add the default gateway IP for each subnet associated with the network
             # to the IRB device.
             subnets = Inventory.get_subnets(network=net["id"])

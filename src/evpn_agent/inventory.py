@@ -87,11 +87,12 @@ def get_networks():
     this particular compute node"""
     return run_query(
         """SELECT DISTINCT
-            networks.id                     AS id,
-            evpnnetworks.l2vni              AS l2vni,
-            evpnnetworks.l3vni              AS l3vni,
-            networksegments.segmentation_id AS segmentation_id,
-            networks.mtu                    AS mtu
+            networks.id                      AS id,
+            evpnnetworks.l2vni               AS l2vni,
+            evpnnetworks.l3vni               AS l3vni,
+            evpnnetworks.advertise_connected AS advertise_connected,
+            networksegments.segmentation_id  AS segmentation_id,
+            networks.mtu                     AS mtu
         FROM
             evpnnetworks,
             ports,
@@ -109,11 +110,12 @@ def get_networks():
             AND ml2_port_bindings.host = %(host)s
         UNION
         SELECT
-            networks.id                     AS id,
-            evpnnetworks.l2vni              AS l2vni,
-            evpnnetworks.l3vni              AS l3vni,
-            networksegments.segmentation_id AS segmentation_id,
-            networks.mtu                    AS mtu
+            networks.id                      AS id,
+            evpnnetworks.l2vni               AS l2vni,
+            evpnnetworks.l3vni               AS l3vni,
+            evpnnetworks.advertise_connected AS advertise_connected,
+            networksegments.segmentation_id  AS segmentation_id,
+            networks.mtu                     AS mtu
         FROM
             evpnnetworks,
             floatingips,

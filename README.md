@@ -55,17 +55,17 @@ IRB in the future.
 * Automatic per-VRF BGP instance creation/removal in FRR
 * IPv6 router advertisement configuration according to the ipv6_ra_mode subnet
   attributes in database
+* Configurable suppression of EVPN Type-5 Prefix routes (or unicast routes for
+  underlay-routed networks) for networks where all IPs are known to OpenStack (and
+  therefore preprovisioned and advertised as EVPN Type-2 MACIP routes), thus preventing
+  traffic to unused IP address from reaching the compute node and triggering futile ARP
+  queries
 
 # Planned features
 
 * Configurable suppression of EVPN Type-3 Inclusive Multicast routes in order to limit
   broadcast traffic on networks where all IPs/MACs are known to OpenStack (and therefore
   preprovisioned)
-* Configurable suppression of EVPN Type-5 Prefix routes (or unicast routes for
-  underlay-routed networks) for networks where all IPs are known to OpenStack (and
-  therefore preprovisioned and advertised as EVPN Type-2 MACIP routes), thus preventing
-  traffic to unused IP address from reaching the compute node and triggering futile ARP
-  queries
 * Dynamic BGP listener on provider networkss, to allow VMs to use BGP to dynamically
   advertise anycast or failover addresses for their applications.
 
@@ -133,6 +133,7 @@ CREATE TABLE evpnnetworks (
   id VARCHAR(36) NOT NULL,
   l2vni MEDIUMINT UNSIGNED DEFAULT NULL,
   l3vni MEDIUMINT UNSIGNED DEFAULT NULL,
+  advertise_connected BOOLEAN DEFAULT TRUE,
   PRIMARY KEY (id),
   FOREIGN KEY (id) REFERENCES networks(id) ON DELETE CASCADE
 );
@@ -255,6 +256,8 @@ This will make the EVPN agent associate the network with a VXLAN segment with L2
 12345, and create a IRB device (a layer-3 device to which the default gateway addresses
 on the network is assigned), which will be associated with a VRF using L3VNI 67890.
 
+## l2vni
+
 If the `l2vni` column is left at its default value `NULL`, no VXLAN segment will be
 created for the network, except if the `l2vni_offset` option is set in `evpn_agent.ini`.
 If it is, then a VXLAN segment will be created with an L2VNI equal to the VLAN ID +
@@ -262,6 +265,8 @@ If it is, then a VXLAN segment will be created with an L2VNI equal to the VLAN I
 
 If the `l2vni` column is set to `0`, no VXLAN segment will be created, regardless of the
 `l2vni_offset` option being set.
+
+## l3vni
 
 If the `l3vni` column is left at its default value `NULL` or set to `0`, no L3VNI will
 be created and bound to the VRF. The VRF created will be named after the VLAN ID of the
@@ -287,3 +292,17 @@ If `l3vni` is `0`, the routes in the VRF will be leaked imported into the defaul
 active port, so that these host routes are also leaked into the default VRF, ensuring
 optimal routing for traffic to known hosts. (Normally, within a VRF bound to an L3VNI,
 Type-2 MACIP routes ensure optimal routing, but these do not get leaked between VRFs.)
+
+## advertise_connected
+
+This boolean value (default TRUE) controls whether or not the directly connected subnets
+on the provider network will be advertised as an aggregate route in BGP (i.e., an EVPN
+Type-5 Prefix route for VRFs with an L3VNI, or an BGP IPv4/IPv6 Unicast route for VRFs
+leaked into the underlay).
+
+This does not impact the advertisement of host routes for the IP addresses associated
+with each OpenStack port active on the hypervisor, so assuming it is known in advance
+that all active IP addresses on the network are associated with OpenStack ports,
+disabling this is a good way of reducing the amount of pointless ARP/ND traffic
+generated because of junk traffic (vulnerability scanners and so on) targeting inactive
+IP addresses within the subnets.

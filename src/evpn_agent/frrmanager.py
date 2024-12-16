@@ -69,15 +69,17 @@ def ensure_vrf(*, vrf, l3vni=None):
 
     frrconf = dedent(
         f"""\
+        route-map {vrf}-redistribute-connected deny 65535
+        exit
         router bgp {asn} vrf {vrf}
             bgp bestpath as-path multipath-relax
             address-family ipv4 unicast
                 redistribute kernel
-                redistribute connected
+                redistribute connected route-map {vrf}-redistribute-connected
             exit-address-family
             address-family ipv6 unicast
                 redistribute kernel
-                redistribute connected
+                redistribute connected route-map {vrf}-redistribute-connected
             exit-address-family
             address-family l2vpn evpn
                 advertise ipv4 unicast
@@ -120,13 +122,19 @@ def ensure_vrf(*, vrf, l3vni=None):
             """
         )
 
-    log.debug("Adding to FRR target config:")
-    for line in frrconf.splitlines():
-        log.debug("> " + line)
-    with NamedTemporaryFile(mode="w") as tmp:
-        tmp.file.write(frrconf)
-        tmp.file.flush()
-        target_config.load_from_file(tmp.name)
+    add_config(frrconf)
+
+
+def ensure_advertise_connected(*, vrf, vlanid):
+    add_config(
+        dedent(
+            f"""\
+            route-map {vrf}-redistribute-connected permit {vlanid}
+                match interface irb-{vlanid}
+            exit
+            """
+        )
+    )
 
 
 def ensure_ra(*, dev, prefix, mode):
@@ -148,7 +156,11 @@ def ensure_ra(*, dev, prefix, mode):
     frrconf += "    no ipv6 nd suppress-ra\n"
     frrconf += "exit\n"
 
-    log.debug("Adding to FRR target config")
+    add_config(frrconf)
+
+
+def add_config(frrconf):
+    log.debug("Adding to FRR target config:")
     for line in frrconf.splitlines():
         log.debug("> " + line)
     with NamedTemporaryFile(mode="w") as tmp:
