@@ -1,10 +1,12 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "evpn_agent"
-version = "0.0.1"
+dynamic = [
+  "version",
+]
 authors = [
   { name="Tore Anderson", email="tore@redpill-linpro.com" },
 ]
@@ -24,3 +26,6 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/toreanderson/evpn_agent"
 Issues = "https://github.com/toreanderson/evpn_agent/issues"
+
+[tool.hatch.version]
+source = "vcs"
