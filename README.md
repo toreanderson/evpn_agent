@@ -60,14 +60,14 @@ IRB in the future.
   therefore preprovisioned and advertised as EVPN Type-2 MACIP routes), thus preventing
   traffic to unused IP address from reaching the compute node and triggering futile ARP
   queries
+* Dynamic BGP listener on provider networks, to allow VMs to use BGP to dynamically
+  advertise anycast or failover addresses for their applications.
 
 # Planned features
 
 * Configurable suppression of EVPN Type-3 Inclusive Multicast routes in order to limit
   broadcast traffic on networks where all IPs/MACs are known to OpenStack (and therefore
   preprovisioned)
-* Dynamic BGP listener on provider networkss, to allow VMs to use BGP to dynamically
-  advertise anycast or failover addresses for their applications.
 
 # Security considerations
 
@@ -160,6 +160,15 @@ exit
 ! agent is being deployed in.
 router bgp 4200000000
  bgp router-id 192.0.2.1
+
+ ! Workaround for an FRR bug present in FRR v8 (at least), that causes BGP routes
+ ! with a next-hop covered by a on-link kernel route to be considered as "not connected"
+ ! and therefore installed as "inactive". The EVPN agent adds such on-link kernel routes
+ ! when the VRF is being leaked into the underlay (l3vni=0) to work around a different
+ ! FRR bug (see https://github.com/FRRouting/frr/issues/16161). If running a later
+ ! version of FRR, or not using underlay leaking, then this setting is probably not
+ ! necessary.
+ bgp disable-ebgp-connected-route-check
 
  ! Use ECMP to load balance outbound traffic across both eth0 and eth1 
  bgp bestpath as-path multipath-relax
@@ -306,3 +315,48 @@ that all active IP addresses on the network are associated with OpenStack ports,
 disabling this is a good way of reducing the amount of pointless ARP/ND traffic
 generated because of junk traffic (vulnerability scanners and so on) targeting inactive
 IP addresses within the subnets.
+
+## Dynamic BGP listener
+
+The agent can dynamically configure FRR to listen for BGP connections from hosts on the
+provider network, allowing them to advertise host routes or prefixes into the VRF. This
+can be useful in order to advertise anycast or fail-over service addresses.
+
+To use this feature, create a subnet route with a next-hop within `0.179.0.0/16` or
+`::179:0:0/96`. The magic number `179` is chosen because it is the TCP port used by BGP.
+The two numbers to the right of `179` is used as the `ge` and `le` values in the
+generated FRR prefix list
+([documentation](https://docs.frrouting.org/en/latest/filter.html#ip-prefix-list)). For
+example:
+
+```
+(openstack) subnet set --host-route destination=2001:db8::/64,gateway=::179:64:64 subnet
+```
+
+The above will allow BGP speakers in `subnet` to advertise `2001:db8::/64` via BGP, but
+no subset of it.
+
+Another example:
+
+```
+(openstack) subnet set --host-route destination=192.0.2.0/24,gateway=0.179.28.32 subnet
+```
+
+This would allow BGP speakers in `subnet` to advertise any prefix that falls within
+192.0.2.0/24 as long as the prefix length of the advertised route is between /28 and
+/32, inclusive. Unlike the previous example, advertising the entire prefix
+(`192.0.2.0/24`) will not be permitted, because the prefix length of 24 would fail the
+`ge 28` check.
+
+The prefix length (right of the slash in `destination`) must be smaller or equal to
+`ge`, which in turn must be smaller or equal to `le`. The agent will log an error if
+this restriction is not respected.
+
+Note that the `ge` and `le` values are read as strings cast to decimal integers, so if
+you want to specify a `ge` and/or `le` of, say, 122, use `::179:122:122` - do *not*
+convert decimal 122 to hexadecimal (0x)7a, even though this is written inside a
+hexadecimal IPv6 address.
+
+Remember to add the addresses or prefixes you want to advertise to the
+`allowed_address_pairs` attribute of the BGP speaking VM's port, if it has port security
+enabled. Otherwise egress traffic from the advertised address/prefix will be dropped.

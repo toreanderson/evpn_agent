@@ -1,6 +1,6 @@
 # evpn_agent - OpenStack EVPN Agent
 #
-# Copyright (C) 2024  Tore Anderson <tore@redpill-linpro.com>
+# Copyright (C) 2024-2025  Tore Anderson <tore@redpill-linpro.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import ipaddress
 import logging
 import re
 from tempfile import NamedTemporaryFile
@@ -67,11 +68,16 @@ def finalise():
 def ensure_vrf(*, vrf, l3vni=None):
     asn = get_asn()
 
+    # See the example FRR config in README.md for an explanation for why the BGP
+    # connected route check is disabled
+
     frrconf = dedent(
         f"""\
         route-map {vrf}-redistribute-connected deny 65535
         exit
         router bgp {asn} vrf {vrf}
+            no bgp default ipv4-unicast
+            bgp disable-ebgp-connected-route-check
             bgp bestpath as-path multipath-relax
             address-family ipv4 unicast
                 redistribute kernel
@@ -155,6 +161,45 @@ def ensure_ra(*, dev, prefix, mode):
 
     frrconf += "    no ipv6 nd suppress-ra\n"
     frrconf += "exit\n"
+
+    add_config(frrconf)
+
+
+def ensure_bgp_listener(*, dev, vrf, subnet, route):
+    log.info(f"Ensuring dynamic BGP listener on {subnet} @ {dev} for {route} in {vrf}")
+    asn = get_asn()
+    cidr = ipaddress.ip_network(route["destination"])
+
+    if match := re.match(r"(::|0\.)179[:.](\d+)[:.](\d+)$", route["nexthop"]):
+        ge = int(match.group(2))
+        le = int(match.group(3))
+
+    if not cidr.prefixlen <= ge <= le:
+        log.error(f"ERROR: Invalid ge/le for {route}, ensure mask length <= ge <= le")
+        return
+
+    if cidr.version == 4:
+        afi = "ipv4"
+        pltype = "ip"
+    elif cidr.version == 6:
+        afi = "ipv6"
+        pltype = "ipv6"
+
+    frrconf = dedent(
+        f"""\
+        {pltype} prefix-list {dev}-accept-bgp permit {cidr} ge {ge} le {le}
+        router bgp {asn} vrf {vrf}
+            neighbor {dev} peer-group
+            neighbor {dev} remote-as external
+            bgp listen range {subnet} peer-group {dev}
+            no bgp default ipv4-unicast
+            address-family {afi} unicast
+                neighbor {dev} activate
+                neighbor {dev} prefix-list {dev}-accept-bgp in
+            exit-address-family
+        exit
+        """
+    )
 
     add_config(frrconf)
 

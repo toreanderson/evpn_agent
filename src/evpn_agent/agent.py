@@ -1,6 +1,6 @@
 # evpn_agent - OpenStack EVPN Agent
 #
-# Copyright (C) 2024  Tore Anderson <tore@redpill-linpro.com>
+# Copyright (C) 2024-2025  Tore Anderson <tore@redpill-linpro.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from ipaddress import ip_address, ip_network
 import logging
 import sys
 import time
@@ -249,6 +250,27 @@ while True:
                 # advertised upstream by FRR thanks to 'redistribute kernel'.
                 for subnetroute in Inventory.get_subnetroutes(subnet_id=subnet["id"]):
                     log.debug(f"Considering subnet route {subnetroute}")
+
+                    # As a special case/hack, if the gateway is set to 0.179.x.y or
+                    # ::179:x:y, then instead of creating a regular route, we enable a
+                    # dynamic BGP listener that allows VMs on this network to advertise
+                    # routes from within the destination prefix to FRR running on the
+                    # hypervisor, which in turn will re-advertise those onward to the
+                    # data centre fabric as Type-5 EVPN routes (or regular IPvX Unicast
+                    # routes if underlay leaking is configured). x and y will be used as
+                    # the ge/le values in the FRR prefix list.
+                    nh = ip_address(subnetroute["nexthop"])
+                    if (nh in ip_network("0.179.0.0/16")) or (
+                        nh in ip_network("::179:0:0/96")
+                    ):
+                        FrrManager.ensure_bgp_listener(
+                            dev=dev,
+                            vrf=vrf,
+                            subnet=subnet["cidr"],
+                            route=subnetroute,
+                        )
+                        continue
+
                     if not [
                         p
                         for p in ports
@@ -331,7 +353,9 @@ while True:
                 # turn have to transmit it onwards to the correct hypervisor via the
                 # L2VNI (assuming there is one).
                 #
-                # To prevent this, and ensure that traffic to known ports are routed
+                # Upstream bug report: https://github.com/FRRouting/frr/issues/16161
+                #
+                # To work around this, and ensure that traffic to known ports is routed
                 # directly to the correct hypervisor by external routes, add a static
                 # host route for the IP address as well. This host route can then be
                 # leaked as a regular unicast route to other VRFs (or the underlay), and
