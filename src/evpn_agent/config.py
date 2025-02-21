@@ -25,6 +25,7 @@ conf = configparser.ConfigParser()
 
 # Set defaults
 conf["agent"] = {
+    "distributed_floating_ips": "true",
     "interval": 1,
     "loglevel": "WARNING",
     "physical_network": "physnet1",

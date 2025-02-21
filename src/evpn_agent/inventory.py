@@ -34,8 +34,9 @@ def run_query(sql, param=None):
 def get_ports():
     """Returns a list of active ports (either normal of floating IPs) on this particular
     compute node"""
-    return run_query(
-        """SELECT
+
+    query = """
+        SELECT
             networksegments.segmentation_id AS segmentation_id,
             ports.mac_address               AS mac_address,
             ports.device_id                 AS device_id,
@@ -54,30 +55,36 @@ def get_ports():
             AND networksegments.network_type = 'vlan'
             AND networksegments.physical_network = %(physnet)s
             AND ports.status = 'ACTIVE'
-            AND ml2_port_bindings.host = %(host)s
-        UNION
-        SELECT
-            networksegments.segmentation_id AS segmentation_id,
-            ports.mac_address               AS mac_address,
-            ports.device_id                 AS device_id,
-            ports.device_owner              AS device_owner,
-            floatingips.floating_ip_address AS ip_address,
-            NULL                            AS subnet_id
-        FROM
-            floatingips,
-            ports,
-            ml2_port_bindings,
-            networks,
-            networksegments
-        WHERE
-            floatingips.floating_network_id = networks.id
-            AND floatingips.fixed_port_id = ml2_port_bindings.port_id
-            AND floatingips.floating_port_id = ports.id
-            AND networks.id = networksegments.network_id
-            AND networksegments.network_type = 'vlan'
-            AND networksegments.physical_network = %(physnet)s
-            AND ml2_port_bindings.status = 'ACTIVE'
-            AND ml2_port_bindings.host = %(host)s""",
+            AND ml2_port_bindings.host = %(host)s"""
+
+    if conf["agent"]["distributed_floating_ips"] == "true":
+        query += """
+            UNION
+            SELECT
+                networksegments.segmentation_id AS segmentation_id,
+                ports.mac_address               AS mac_address,
+                ports.device_id                 AS device_id,
+                ports.device_owner              AS device_owner,
+                floatingips.floating_ip_address AS ip_address,
+                NULL                            AS subnet_id
+            FROM
+                floatingips,
+                ports,
+                ml2_port_bindings,
+                networks,
+                networksegments
+            WHERE
+                floatingips.floating_network_id = networks.id
+                AND floatingips.fixed_port_id = ml2_port_bindings.port_id
+                AND floatingips.floating_port_id = ports.id
+                AND networks.id = networksegments.network_id
+                AND networksegments.network_type = 'vlan'
+                AND networksegments.physical_network = %(physnet)s
+                AND ml2_port_bindings.status = 'ACTIVE'
+                AND ml2_port_bindings.host = %(host)s"""
+
+    return run_query(
+        query,
         {"host": socket.getfqdn(), "physnet": conf["agent"]["physical_network"]},
     )
 
