@@ -54,7 +54,7 @@ def get_ports():
             AND networks.id = networksegments.network_id
             AND networksegments.network_type = 'vlan'
             AND networksegments.physical_network = %(physnet)s
-            AND ports.status = 'ACTIVE'
+            AND ml2_port_bindings.status = 'ACTIVE'
             AND ml2_port_bindings.host = %(host)s"""
 
     if conf["agent"]["distributed_floating_ips"] == "true":
