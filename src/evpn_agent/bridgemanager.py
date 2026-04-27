@@ -60,24 +60,12 @@ def ensure_fdb(*, lladdr, vid):
         if (
             entry["mac"] == lladdr
             and entry["vlan"] == vid
-            and (
-                entry["flags"] == ["sticky"]
-                # If the FDB was previously learned from a remote VTEP and installed
-                # by FRR, it'll have the extern_learn flag, which will stay there if
-                # we take over management of it. However there does no appear to be a
-                # way of creating a FDB entry from scratch with both flags in one go,
-                # nor a way of clearing the extern_learn flag with 'bridge fdb replace',
-                # so just accept both cases for now, even though it would be more
-                # appropriate to ensure the extern_learn flag is either always or never
-                # present on the fdb entries managed by the agent. 
-                or entry["flags"] == ["extern_learn", "sticky"]
-            )
             and entry["master"] == conf["bridge"]["name"]
             and entry["state"] == "static"
         ):
             log.debug(f"…already present: {entry}")
             return
-    log.warning(f"Adding static sticky FDB entry for {lladdr} on VLAN {vid}")
+    log.warning(f"Adding static FDB entry for {lladdr} on VLAN {vid}")
     cmd(
         [
             "bridge",
@@ -90,7 +78,6 @@ def ensure_fdb(*, lladdr, vid):
             "vlan",
             str(vid),
             "static",
-            "sticky",
         ]
     )
 
