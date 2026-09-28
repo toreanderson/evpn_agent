@@ -171,7 +171,10 @@ while True:
                 },
                 type_attrs={"table": rt_table},
             )
-            FrrManager.ensure_vrf(vrf=vrf, l3vni=l3vni)
+            # L2-only networks (L3VNI is NULL) have no routes that FRR could
+            # advertise, so they only need the VRF device in order to isolate the IRB
+            if l3vni:
+                FrrManager.ensure_vrf(vrf=vrf, l3vni=l3vni)
         else:
             log.info(f"Ensuring underlay redistribution for VLAN {vid}")
             FrrManager.ensure_underlay_redistribution(vlanid=vid)

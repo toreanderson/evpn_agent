@@ -69,7 +69,7 @@ def finalise():
     update()
 
 
-def ensure_vrf(*, vrf, l3vni=None):
+def ensure_vrf(*, vrf, l3vni):
     asn = get_asn()
 
     # See the example FRR config in README.md for an explanation for why the BGP
@@ -99,15 +99,14 @@ def ensure_vrf(*, vrf, l3vni=None):
         """
     )
 
-    # Configure L3VNI mapping for VRF, if one is provided
-    if l3vni:
-        frrconf += dedent(
-            f"""\
-                vrf {vrf}
-                    vni {l3vni}
-                exit-vrf
-            """
-        )
+    # Configure L3VNI mapping for VRF
+    frrconf += dedent(
+        f"""\
+            vrf {vrf}
+                vni {l3vni}
+            exit-vrf
+        """
+    )
 
     add_config(frrconf)
 
