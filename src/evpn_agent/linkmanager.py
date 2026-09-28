@@ -60,8 +60,11 @@ def ensure_link(
         if type != "veth" and link:
             cmdline.extend(["link", link])
         for k, v in link_attrs.items():
-            # addrgenmode can not be set at creation time
+            # addrgenmode can not be set at creation time (it is synced below instead)
             if k == "inet6_addr_gen_mode":
+                continue
+            # attributes set to None (e.g., master) are unset by default anyway
+            if v is None:
                 continue
             cmdline.extend(_link_attr_to_cmd(k, v))
         cmdline.extend(["type", type])
@@ -123,6 +126,8 @@ def prune():
 
 
 def _link_attr_to_cmd(attr, val):
+    if attr == "master" and val is None:
+        return ["nomaster"]
     if attr == "inet6_addr_gen_mode":
         attr = "addrgenmode"
     if attr == "ifalias":

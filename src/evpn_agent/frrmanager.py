@@ -109,37 +109,47 @@ def ensure_vrf(*, vrf, l3vni=None):
             """
         )
 
-    # Configure leaking of routes to/from underlay if l3vni=0 (as opposed to None)
-    if l3vni == 0:
-        frrconf += dedent(
+    add_config(frrconf)
+
+
+def ensure_underlay_redistribution(*, vlanid):
+    asn = get_asn()
+
+    # Redistribute routes associated with the IRB of an underlay-routed network (i.e.,
+    # with l3vni=0) into the underlay BGP instance. Unlike in the VRFs, the route maps
+    # are needed for kernel routes too, as the main routing table might contain kernel
+    # routes unrelated to the EVPN agent that should not be advertised.
+    add_config(
+        dedent(
             f"""\
+            route-map underlay-redistribute-connected deny 65535
+            exit
+            route-map underlay-redistribute-kernel permit {vlanid}
+                match interface irb-{vlanid}
+            exit
+            route-map underlay-redistribute-kernel deny 65535
+            exit
             router bgp {asn}
                 address-family ipv4 unicast
-                    import vrf {vrf}
+                    redistribute kernel route-map underlay-redistribute-kernel
+                    redistribute connected route-map underlay-redistribute-connected
                 exit-address-family
                 address-family ipv6 unicast
-                    import vrf {vrf}
-                exit-address-family
-            exit
-            router bgp {asn} vrf {vrf}
-                address-family ipv4 unicast
-                    import vrf default
-                exit-address-family
-                address-family ipv6 unicast
-                    import vrf default
+                    redistribute kernel route-map underlay-redistribute-kernel
+                    redistribute connected route-map underlay-redistribute-connected
                 exit-address-family
             exit
             """
         )
-
-    add_config(frrconf)
+    )
 
 
 def ensure_advertise_connected(*, vrf, vlanid):
+    # vrf=None means the network is routed in the underlay (i.e., the default VRF)
     add_config(
         dedent(
             f"""\
-            route-map {vrf}-redistribute-connected permit {vlanid}
+            route-map {vrf or 'underlay'}-redistribute-connected permit {vlanid}
                 match interface irb-{vlanid}
             exit
             """
@@ -170,7 +180,10 @@ def ensure_ra(*, dev, prefix, mode):
 
 
 def ensure_bgp_listener(*, dev, vrf, subnet, route):
-    log.info(f"Ensuring dynamic BGP listener on {subnet} @ {dev} for {route} in {vrf}")
+    log.info(
+        f"Ensuring dynamic BGP listener on {subnet} @ {dev} for {route} in "
+        + (vrf or "underlay")
+    )
     asn = get_asn()
     cidr = ipaddress.ip_network(route["destination"])
 
@@ -192,18 +205,27 @@ def ensure_bgp_listener(*, dev, vrf, subnet, route):
     frrconf = dedent(
         f"""\
         {pltype} prefix-list {dev}-accept-bgp permit {cidr} ge {ge} le {le}
-        router bgp {asn} vrf {vrf}
+        router bgp {asn}{f' vrf {vrf}' if vrf else ''}
             neighbor {dev} peer-group
             neighbor {dev} remote-as external
             bgp listen range {subnet} peer-group {dev}
-            no bgp default ipv4-unicast
-            address-family {afi} unicast
-                neighbor {dev} activate
-                neighbor {dev} prefix-list {dev}-accept-bgp in
-            exit-address-family
-        exit
         """
     )
+
+    # Ensure the BGP speakers are only activated for the address family of the
+    # listener, as they could otherwise advertise arbitrary (and unfiltered) IPv4
+    # routes. In the VRFs, we own the BGP instance and can simply disable the implicit
+    # IPv4 unicast activation. In the underlay BGP instance, this is left to the admin
+    # (see README.md).
+    if vrf:
+        frrconf += "    no bgp default ipv4-unicast\n"
+
+    frrconf += f"    address-family {afi} unicast\n"
+    frrconf += f"        neighbor {dev} activate\n"
+    frrconf += f"        neighbor {dev} prefix-list {dev}-accept-bgp in\n"
+    frrconf += "    exit-address-family\n"
+
+    frrconf += "exit\n"
 
     add_config(frrconf)
 
