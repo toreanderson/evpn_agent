@@ -98,10 +98,25 @@ while True:
         advertise_connected = net["advertise_connected"]
 
         # If the network has a L3VNI assigned, associate it to a VRF that is shared
-        # between all networks using that L3VNI. Otherwise, associate it to an isolated
-        # VLAN specific VRF (mostly useful in order to leak routes into the underlay)
-        vrf_id = l3vni if l3vni else vid
-        rt_table = vrf_id + int(conf["agent"]["rt_table_offset"])
+        # between all networks using that L3VNI. If the L3VNI is 0, the network is
+        # routed directly in the underlay (the default VRF), so no VRF is needed.
+        # Otherwise (L3VNI is NULL), associate it to an isolated VLAN specific VRF.
+        if l3vni == 0:
+            vrf_id = None
+            vrf = None
+            rt_table = "main"
+        else:
+            vrf_id = vid if l3vni is None else l3vni
+            vrf = "vrf-" + str(vrf_id)
+            rt_table = vrf_id + int(conf["agent"]["rt_table_offset"])
+
+        # For networks routed in the underlay, routes via the IRB would by default make
+        # the hypervisor use the anycast gateway address as the source address for
+        # traffic it originates itself, e.g., to VMs on the network. Replies would then
+        # go to whichever hypervisor the VM is running on, which is not necessarily this
+        # one (e.g., after a live migration). Use the primary loopback address instead.
+        # This is done for IPv4 only, as there is no primary IPv6 loopback address.
+        prefsrc4 = AddressManager.get_primary_loopback_ipv4() if l3vni == 0 else None
 
         # Ensure that the VLAN is added to the veth port (connected to the OVS bridge)
         BridgeManager.ensure_vlan(vid=vid, dev=conf["bridge"]["veth"])
@@ -145,22 +160,27 @@ while True:
         # addresses to it with the correct prefix length. FRR will take care of
         # advertising routes for the link prefixes into the EVPN fabric with BGP thanks
         # to the "redistribute connected" setting.
-        log.info(f"Ensuring VRF/IRB/L3VNI for VRF {vrf_id}")
-        vrf = "vrf-" + str(vrf_id)
-        irb = "irb-" + str(vrf_id)
-        LinkManager.ensure_link(
-            name=vrf,
-            type="vrf",
-            link_attrs={
-                "ifalias": "VRF " + str(vrf_id),
-                "inet6_addr_gen_mode": "none",
-            },
-            type_attrs={"table": rt_table},
-        )
+        if vrf:
+            log.info(f"Ensuring VRF/IRB/L3VNI for VRF {vrf_id}")
+            LinkManager.ensure_link(
+                name=vrf,
+                type="vrf",
+                link_attrs={
+                    "ifalias": "VRF " + str(vrf_id),
+                    "inet6_addr_gen_mode": "none",
+                },
+                type_attrs={"table": rt_table},
+            )
+            # L2-only networks (L3VNI is NULL) have no routes that FRR could
+            # advertise, so they only need the VRF device in order to isolate the IRB
+            if l3vni:
+                FrrManager.ensure_vrf(vrf=vrf, l3vni=l3vni)
+        else:
+            log.info(f"Ensuring underlay redistribution for VLAN {vid}")
+            FrrManager.ensure_underlay_redistribution(vlanid=vid)
 
-        FrrManager.ensure_vrf(vrf=vrf, l3vni=l3vni)
-
-        # Create an IRB device bound bound to the VRF created above
+        # Create an IRB device bound bound to the VRF created above (or no VRF at all,
+        # i.e., the default VRF, if the network is routed in the underlay)
         log.info(f"Ensuring IRB for {net['id']} (VLAN {vid})")
         dev = "irb-" + str(vid)
         LinkManager.ensure_link(
@@ -170,7 +190,7 @@ while True:
             link_attrs={
                 "mtu": mtu,
                 "ifalias": "IRB for VLAN " + str(vid),
-                "master": "vrf-" + str(vrf_id),
+                "master": vrf,
             },
             type_attrs={"id": vid},
         )
@@ -179,6 +199,7 @@ while True:
         # If the network has a L3VNI assigned, create it plus an IRB device that can
         # is used to send/receive L3 traffic to/from the VXLAN device.
         if l3vni:
+            irb = "irb-" + str(vrf_id)
             LinkManager.ensure_link(
                 name=irb,
                 type="bridge",
@@ -214,9 +235,8 @@ while True:
         # the provider network.
         #
         # Also do so if the L3VNI is explicitly set to 0 (as opposed to the default
-        # NULL). In this case, the routing domain will be isolated on the hypervisor,
-        # which is probably only useful if the routes is being leaked to/from another
-        # VRF by FRR, such as to the underlay.
+        # NULL). In this case, the IRB is placed in the default VRF, and the routes are
+        # advertised as regular unicast routes by the underlay BGP instance in FRR.
         #
         # Don't enable the anycast gateway nor any routes if the L3VNI is NULL, as that
         # is taken to mean the provider network is L2 only, and that the L3 gateway (if
@@ -240,6 +260,10 @@ while True:
                 log.debug(f"Processing subnet {subnet}")
                 gw = subnet["gateway_ip"] + "/" + subnet["cidr"].split("/")[-1]
                 AddressManager.ensure_address(dev=dev, address=gw)
+                if prefsrc4 and ":" not in subnet["cidr"]:
+                    RouteManager.ensure_prefix_route_prefsrc(
+                        dst=subnet["cidr"], dev=dev, prefsrc=prefsrc4
+                    )
                 if subnet["enable_dhcp"] and subnet["ipv6_ra_mode"]:
                     FrrManager.ensure_ra(
                         dev=dev, prefix=subnet["cidr"], mode=subnet["ipv6_ra_mode"]
@@ -257,8 +281,8 @@ while True:
                     # routes from within the destination prefix to FRR running on the
                     # hypervisor, which in turn will re-advertise those onward to the
                     # data centre fabric as Type-5 EVPN routes (or regular IPvX Unicast
-                    # routes if underlay leaking is configured). x and y will be used as
-                    # the ge/le values in the FRR prefix list.
+                    # routes if the network is routed in the underlay). x and y will be
+                    # used as the ge/le values in the FRR prefix list.
                     nh = ip_address(subnetroute["nexthop"])
                     if (nh in ip_network("0.179.0.0/16")) or (
                         nh in ip_network("::179:0:0/96")
@@ -284,6 +308,7 @@ while True:
                             dst=subnetroute["destination"],
                             gateway=subnetroute["nexthop"],
                             dev=dev,
+                            prefsrc=None if ":" in subnetroute["nexthop"] else prefsrc4,
                             table=str(rt_table),
                         )
                     )
@@ -317,6 +342,9 @@ while True:
                                     dst=tenantnet["cidr"],
                                     gateway=port["ip_address"],
                                     dev=dev,
+                                    prefsrc=(
+                                        None if ":" in port["ip_address"] else prefsrc4
+                                    ),
                                     table=str(rt_table),
                                 )
                             )
@@ -342,30 +370,26 @@ while True:
                     dev="irb-" + str(port["segmentation_id"]),
                 )
 
-                # If the IRB is not bound to an L3VNI, the Type-2 MACIP routes for the
-                # static neigh entries added above will not be leaked into other VRFs
-                # as regular host routes, only the on-link prefix would. Therefore,
-                # routing to the IP addresses in question would follow the route to the
-                # subnet prefix on the network. Since the subnet prefix will be
-                # advertised by all hypervisors where the network is active, this will
-                # lead to inefficient routing, as the external routers might send the
-                # traffic to a hypervisor where the port is not active, which will in
-                # turn have to transmit it onwards to the correct hypervisor via the
-                # L2VNI (assuming there is one).
+                # If the network is routed in the underlay, there are no Type-2 MACIP
+                # routes to ensure optimal routing to the IP addresses in question, only
+                # the on-link prefix would be advertised (if advertise_connected is set).
+                # Since the subnet prefix will be advertised by all hypervisors where
+                # the network is active, this will lead to inefficient routing, as the
+                # external routers might send the traffic to a hypervisor where the port
+                # is not active, which will in turn have to transmit it onwards to the
+                # correct hypervisor via the L2VNI (assuming there is one).
                 #
-                # Upstream bug report: https://github.com/FRRouting/frr/issues/16161
-                #
-                # To work around this, and ensure that traffic to known ports is routed
-                # directly to the correct hypervisor by external routes, add a static
-                # host route for the IP address as well. This host route can then be
-                # leaked as a regular unicast route to other VRFs (or the underlay), and
-                # be advertised onwards from there, ensuring efficient routing.
+                # To ensure that traffic to known ports is routed directly to the
+                # correct hypervisor by external routers, add a static host route for
+                # the IP address as well. This host route will be advertised as a
+                # regular unicast route by FRR thanks to 'redistribute kernel'.
                 if l3vni == 0:
                     log.info("Adding static host route in underlay")
                     RouteManager.ensure_route(
                         RouteManager.Route(
                             dst=port["ip_address"],
                             dev="irb-" + str(port["segmentation_id"]),
+                            prefsrc=None if ":" in port["ip_address"] else prefsrc4,
                             table=str(rt_table),
                         )
                     )
