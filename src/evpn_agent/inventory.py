@@ -113,7 +113,7 @@ def get_networks():
             AND ports.id = ml2_port_bindings.port_id
             AND networksegments.network_type = 'vlan'
             AND networksegments.physical_network = %(physnet)s
-            AND ports.status = 'ACTIVE'
+            AND ml2_port_bindings.status = 'ACTIVE'
             AND ml2_port_bindings.host = %(host)s
         UNION
         SELECT
