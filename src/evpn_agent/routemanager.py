@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import ipaddress
 import logging
 from typing import NamedTuple
 from .config import conf
@@ -34,6 +35,19 @@ class Route(NamedTuple):
     type: str = "unicast"
     metric: int = 1024
     table: str = "main"
+
+
+def _normalise_dst(dst):
+    """Returns the destination in canonical CIDR notation, including the prefix length.
+
+    The kernel (or rather iproute2) displays host routes without a prefix length
+    (e.g., "192.0.2.1" rather than "192.0.2.1/32"), while subnet routes from the
+    Neutron database always include one. Normalise both so they can be compared."""
+    try:
+        return ipaddress.ip_network(dst, strict=False).with_prefixlen
+    except ValueError:
+        log.error(f"Unable to parse route destination {dst}, not normalising it")
+        return dst
 
 
 def update():
@@ -62,7 +76,7 @@ def update():
 
             state.append(
                 Route(
-                    dst=rt["dst"],
+                    dst=_normalise_dst(rt["dst"]),
                     gateway=rt.get("gateway"),
                     dev=rt.get("dev"),
                     type=rt.get("type"),
@@ -84,6 +98,7 @@ def finalise():
 def ensure_route(route: Route):
     global known_routes
 
+    route = route._replace(dst=_normalise_dst(route.dst))
     log.info(f"Ensuring {route}")
     known_routes.append(route)
 
